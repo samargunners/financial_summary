@@ -7,7 +7,7 @@ RAW_DIR = Path("C:/Projects/financial_summary/data/raw")
 PROCESSED_DIR = Path("C:/Projects/financial_summary/data/processed")
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-# === KNOWN CATEGORY HEADERS ===
+# === CATEGORY HEADERS TO TRACK ===
 category_headers = [
     "Sales",
     "Cost of Goods Sold",
@@ -15,7 +15,7 @@ category_headers = [
     "Other Income (Expenses)"
 ]
 
-# === MOCKED STORE MAP (to be loaded dynamically in actual script) ===
+# === STORE NAME TO PC NUMBER MAP (cleaned version) ===
 store_map = {
     "enola": "357993",
     "paxton": "301290",
@@ -27,18 +27,24 @@ store_map = {
     "eisenhower": "362913"
 }
 
-# === EXTRACT STORE NAME FROM FILE ===
-def extract_store_key(filename):
-    match = re.search(r"2025\s(.+?)\sIncome", filename)
+# === Extract standardized store name from file name ===
+def extract_store_key(filename: str):
+    match = re.search(r"\d{4}\s(.+?)\sIncome", filename)
     if match:
-        return match.group(1).strip().lower().replace("-", "").replace(" ", "")
+        key = match.group(1).strip().lower().replace("-", "").replace(" ", "")
+        return key
     return None
 
-# === PROCESS EACH FILE ===
+# === Main Processing ===
 all_cleaned_data = []
 
 for file in RAW_DIR.glob("*.xlsx"):
-    df = pd.read_excel(file, header=None)
+    try:
+        df = pd.read_excel(file, header=None)
+    except Exception as e:
+        print(f"❌ Failed to read {file.name}: {e}")
+        continue
+
     store_key = extract_store_key(file.name)
     pc_number = store_map.get(store_key)
 
@@ -46,17 +52,29 @@ for file in RAW_DIR.glob("*.xlsx"):
         print(f"⚠️ Skipping {file.name} (store not recognized)")
         continue
 
-    # Find the row with date headers
-    date_row_idx = df[df.apply(lambda row: row.astype(str).str.contains(r"/\d{2}/\d{2}", regex=True).any(), axis=1)].index[0]
+    # Detect row with date headers
+    date_row_idx = None
+    for i in range(0, 10):
+        if df.iloc[i].astype(str).str.contains(r"\d{2}/\d{2}/\d{2}").sum() >= 5:
+            date_row_idx = i
+            break
+
+    if date_row_idx is None:
+        print(f"⚠️ Could not find month header row in {file.name}")
+        continue
+
     date_row = df.iloc[date_row_idx]
-    month_cols = [i for i, val in enumerate(date_row) if isinstance(val, pd.Timestamp) or isinstance(val, str)]
+    month_cols = [
+        i for i, val in enumerate(date_row)
+        if isinstance(val, str) and re.match(r"\d{2}/\d{2}/\d{2}", val.strip()) and "total" not in val.lower()
+    ]
 
     current_category = None
     parsed_rows = []
 
     for idx in range(date_row_idx + 1, len(df)):
         row = df.iloc[idx]
-        first_cell = str(row[0]).strip()
+        first_cell = str(row[1]).strip() if pd.notna(row[1]) else ""
 
         if first_cell in category_headers:
             current_category = first_cell
@@ -75,14 +93,16 @@ for file in RAW_DIR.glob("*.xlsx"):
                             "account": first_cell,
                             "amount": float(amount)
                         })
-                except:
+                except Exception:
                     continue
 
-    clean_df = pd.DataFrame(parsed_rows)
-    output_file = PROCESSED_DIR / f"{store_key}_processed.csv"
-    clean_df.to_csv(output_file, index=False)
-    all_cleaned_data.append(clean_df)
+    if parsed_rows:
+        clean_df = pd.DataFrame(parsed_rows)
+        output_file = PROCESSED_DIR / f"{store_key}_processed.csv"
+        clean_df.to_csv(output_file, index=False)
+        all_cleaned_data.append(output_file.name)
+        print(f"✅ Processed and saved: {output_file.name}")
+    else:
+        print(f"⚠️ No usable data found in: {file.name}")
 
-# === Display preview of all processed data ===
-combined_preview = pd.concat(all_cleaned_data).reset_index(drop=True)
-import ace_tools as tools; tools.display_dataframe_to_user(name="Cleaned CPA Income Data", dataframe=combined_preview.head(100))
+print(f"\n🎯 Done! {len(all_cleaned_data)} file(s) processed.")
